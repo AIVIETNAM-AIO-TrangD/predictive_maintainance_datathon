@@ -9,3 +9,8 @@ outputs/
 __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
+
+# exception: slim dashboard data for Streamlit Community Cloud (built by src/make_dashboard_bundle.py).
+# The repository is public, so everything in this folder is public.
+!dashboard/bundle/
+!dashboard/bundle/**

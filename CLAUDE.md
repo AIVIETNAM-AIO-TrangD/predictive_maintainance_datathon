@@ -10,6 +10,7 @@ using an NLinear model, plus a dashboard. DSMLC F26 Datathon.
 - The daily file is large: read with pyarrow, select columns, process by
   well or in chunks. Don't load everything casually.
 - Never `git add` anything in data/ or any .parquet/.csv file.
+- Only exception: dashboard/bundle/ (slim dashboard data for Streamlit Cloud, ~14 MB, no free text; built by python src/make_dashboard_bundle.py). The repo is public, so this data is public.
 
 ## Cleaning rules (src/clean.py)
 - Dedupe on (uwi, production_date).
@@ -35,7 +36,7 @@ using an NLinear model, plus a dashboard. DSMLC F26 Datathon.
 - Predict: python src/predict.py --model <ckpt> [--start 2026-04-01] [--threshold 0.5|f1|cost] [--forecast]
 - Cost evaluation: python src/evaluate.py [--cost-fn --cost-fp --oil-value --budget] -> outputs/evaluation/. Test (>= 2026-06-27) is scored only; thresholds, calibration, tiers and policy settings are fitted on validation.
 - Run torch scripts/tests with the datathon-2026 env python (base Anaconda has no torch).
-- Dashboard: streamlit run dashboard/app.py
+- Dashboard: python -m streamlit run dashboard/app.py (base Anaconda env; deployed app uses dashboard/requirements.txt and reads dashboard/bundle/ when outputs/ is absent)
 - Tests: pytest tests/
 
 ## Git
