@@ -123,6 +123,21 @@ def style(fig, height=None):
 
 # ------------------------------------------------------------------------------------------ app
 st.set_page_config(page_title="PCP Failure Risk", layout="wide")
+
+REQUIRED = [OUT / "forecast_fail_next_30d.parquet", OUT / f"predictions_fail_next_30d_{MODEL}.parquet",
+            OUT / f"drivers_channels_{MODEL}.parquet", OUT / f"drivers_groups_{MODEL}.parquet",
+            OUT / "evaluation" / "thresholds.csv", DATA / "wells.parquet", DATA / "dashboard.parquet",
+            DATA / "failure_events.parquet", DATA / "jobs_clean.parquet"]
+missing = [str(p.relative_to(ROOT)) for p in REQUIRED if not p.exists()]
+if missing:
+    st.title("PCP failure risk")
+    st.error("The dashboard's data files are not available here, so there is nothing to show yet.")
+    st.markdown("Missing files:\n" + "\n".join(f"- `{m}`" for m in missing))
+    st.markdown("These files are produced by the pipeline in `src/` and are intentionally not stored on GitHub "
+                "(see CLAUDE.md). Run the app locally with `python -m streamlit run dashboard/app.py`, or provide "
+                "the data to this deployment.")
+    st.stop()
+
 fc = load_forecast()
 anchor = fc.production_date.max()
 win_start, win_end = fc.forecast_window_start.max(), fc.forecast_window_end.max()
