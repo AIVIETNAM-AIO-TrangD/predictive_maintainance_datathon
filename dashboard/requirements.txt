@@ -1,0 +1,7 @@
+# Dashboard-only dependencies (Streamlit Community Cloud reads this file before the root
+# requirements.txt). No torch: the dashboard only reads pre-computed Parquet/CSV files.
+streamlit==1.51.0
+plotly==6.3.0
+pandas==2.3.3
+numpy==2.3.5
+pyarrow==21.0.0
