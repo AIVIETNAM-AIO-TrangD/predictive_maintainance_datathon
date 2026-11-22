@@ -24,6 +24,9 @@ from plotly.subplots import make_subplots
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT, DATA, FIG = ROOT / "outputs", ROOT / "data" / "processed", ROOT / "reports" / "figures"
+BUNDLE = Path(__file__).resolve().parent / "bundle"      # slim copy for deployment (src/make_dashboard_bundle.py)
+if not (OUT / "forecast_fail_next_30d.parquet").exists() and (BUNDLE / "forecast_fail_next_30d.parquet").exists():
+    OUT = DATA = BUNDLE
 MODEL = "v1"
 
 BLUE, RED, GRAY, INK, MUTED = "#2a78d6", "#e34948", "#9a9893", "#0b0b0b", "#52514e"
@@ -80,9 +83,8 @@ def load_forecast() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_drivers() -> tuple[pd.DataFrame, pd.DataFrame]:
-    return (pd.read_parquet(OUT / f"drivers_channels_{MODEL}.parquet"),
-            pd.read_parquet(OUT / f"drivers_groups_{MODEL}.parquet"))
+def load_drivers() -> pd.DataFrame:
+    return pd.read_parquet(OUT / f"drivers_channels_{MODEL}.parquet")
 
 
 @st.cache_data
@@ -94,7 +96,8 @@ def load_history() -> pd.DataFrame:
 
 @st.cache_data
 def load_events() -> tuple[pd.DataFrame, pd.DataFrame]:
-    ev = pd.read_parquet(DATA / "failure_events.parquet")
+    ev = pd.read_parquet(DATA / "failure_events.parquet", columns=["uwi", "event_start", "event_end", "failure_group",
+                                                                    "cause_group", "repair_job_category"])
     jobs = pd.read_parquet(DATA / "jobs_clean.parquet", columns=["uwi", "start_date", "end_date", "job_category",
                                                                   "job_type", "job_subtype", "job_duration_days"])
     return ev, jobs
@@ -125,7 +128,7 @@ def style(fig, height=None):
 st.set_page_config(page_title="PCP Failure Risk", layout="wide")
 
 REQUIRED = [OUT / "forecast_fail_next_30d.parquet", OUT / f"predictions_fail_next_30d_{MODEL}.parquet",
-            OUT / f"drivers_channels_{MODEL}.parquet", OUT / f"drivers_groups_{MODEL}.parquet",
+            OUT / f"drivers_channels_{MODEL}.parquet",
             OUT / "evaluation" / "thresholds.csv", DATA / "wells.parquet", DATA / "dashboard.parquet",
             DATA / "failure_events.parquet", DATA / "jobs_clean.parquet"]
 missing = [str(p.relative_to(ROOT)) for p in REQUIRED if not p.exists()]
@@ -133,9 +136,8 @@ if missing:
     st.title("PCP failure risk")
     st.error("The dashboard's data files are not available here, so there is nothing to show yet.")
     st.markdown("Missing files:\n" + "\n".join(f"- `{m}`" for m in missing))
-    st.markdown("These files are produced by the pipeline in `src/` and are intentionally not stored on GitHub "
-                "(see CLAUDE.md). Run the app locally with `python -m streamlit run dashboard/app.py`, or provide "
-                "the data to this deployment.")
+    st.markdown("These files are produced by the pipeline in `src/`. For a deployment, build the slim copy with "
+                "`python src/make_dashboard_bundle.py` (writes `dashboard/bundle/`).")
     st.stop()
 
 fc = load_forecast()
@@ -256,7 +258,7 @@ with tab_well:
     c[5].metric("Pump", f"{w.pcp_pump_make or '–'}", help=f"Model: {w.pcp_pump_model}")
     st.caption(f"Field: {w.field_operating_area} · Facility: {w.facility_name} · Status: {w.well_daily_status}")
 
-    ch, grp = load_drivers()
+    ch = load_drivers()
     left, right = st.columns([2, 3])
     with left:
         d = ch[ch.uwi == uwi].copy()
@@ -333,7 +335,7 @@ with tab_well:
 
 # ------------------------------------------------------------------------------------------ factors
 with tab_factors:
-    ch, grp = load_drivers()
+    ch = load_drivers()
     st.markdown("What pushes risk up across the fleet, from the model's own contributions on the scoring day. "
                 "Each contribution compares a well with a typical well (training median); positive = higher risk.")
     tiers = fc.set_index("uwi").risk_tier
