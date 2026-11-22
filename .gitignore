@@ -1,0 +1,11 @@
+# data: never commit (CLAUDE.md)
+data/
+raw_dataset/
+*.parquet
+*.csv
+outputs/
+
+# python / tooling
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
