@@ -50,6 +50,14 @@ def main() -> None:
                              "job_duration_days"]).query("uwi in @wells").to_parquet(
         BUNDLE / "jobs_clean.parquet", index=False)
 
+    surv = OUT / "survival"
+    if (surv / "summary.csv").exists():                     # run-life results (src/survival.py)
+        (BUNDLE / "survival").mkdir()
+        shutil.copy(surv / "summary.csv", BUNDLE / "survival")
+        shutil.copy(surv / "km_curves.parquet", BUNDLE / "survival")
+        pd.read_parquet(surv / "current_wells.parquet").query("uwi in @wells").to_parquet(
+            BUNDLE / "survival" / "current_wells.parquet", index=False)
+
     since = (fc.production_date.max() - pd.Timedelta(days=OPS_DAYS + 5)).to_pydatetime()
     cols = ["uwi", "production_date", "oil_produced_m3", "water_produced_m3", "hours_on_prod", "hours_down",
             "pcp_pump_rpm", "pcp_pump_rod_torque_ftlb", "pump_efficiency_pct", "downtime_code_1"]

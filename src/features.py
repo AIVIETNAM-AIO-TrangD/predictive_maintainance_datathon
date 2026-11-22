@@ -3,6 +3,8 @@
 Two feature sets:
   v1  exactly the pipeline of src/model.ipynb (the original checkpoint). Do not change it:
       src/predict.py --verify checks it reproduces the notebook's saved predictions.
+  v3  the v1 pipeline on merged_v3.parquet: failure history and labels reconstructed from repair jobs
+      back to 2021 (src/merge.py --proxy-before), so the model can train on 2021-2026.
   v2  v1 plus: sentinel guard, partly-reported days treated as missing (not shutdowns),
       extra leak-free rolling/delta operating features, recency/count history, and lagged
       downtime-code counts. Every value at day t uses only data from days <= t.
@@ -27,7 +29,9 @@ TARGET = "fail_next_30d"
 LABEL_START = pd.Timestamp("2025-06-01")
 MAX_LOOKBACK = 60
 DATA_START = {"v1": LABEL_START - pd.Timedelta(days=MAX_LOOKBACK + 35),
-              "v2": LABEL_START - pd.Timedelta(days=MAX_LOOKBACK + 100)}   # room for 60-day rolling features
+              "v2": LABEL_START - pd.Timedelta(days=MAX_LOOKBACK + 100),   # room for 60-day rolling features
+              "v3": pd.Timestamp("2021-01-01")}                            # full history (merged_v3, proxy labels)
+MERGED = {"v1": "merged.parquet", "v2": "merged.parquet", "v3": "merged_v3.parquet"}
 LEAKY = ["fail_next_30d", "fail_next_7d", "days_to_next_failure", "failure_active", "failure_onset",
          "active_failure_type", "active_failure_cause", "job_active", "last_job_duration_days",
          "job_cost_prior", "label_observed", "split"]
@@ -149,7 +153,7 @@ def build_frame(feature_set: str = "v1") -> tuple[pd.DataFrame, np.ndarray, list
     """Returns (frame sorted by uwi/date, position-in-well, channel list for this feature set)."""
     v2 = feature_set == "v2"
     since = [("production_date", ">=", DATA_START[feature_set].to_pydatetime())]
-    m = pd.read_parquet(P / "merged.parquet", filters=since,
+    m = pd.read_parquet(P / MERGED[feature_set], filters=since,
                         columns=["uwi", "production_date", "split", "well_daily_status", TARGET, "failure_active"]
                         + HIST + STATIC + CATS)
     ops_cols = DAILY + SETPOINT + (["downtime_code_1"] if v2 else [])

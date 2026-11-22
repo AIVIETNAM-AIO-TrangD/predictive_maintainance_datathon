@@ -174,7 +174,7 @@ def _asof_last(panel: pd.DataFrame, rows: pd.DataFrame, cols: list[str],
     return out.sort_values("_row").reset_index(drop=True)
 
 
-def add_failure_features(panel: pd.DataFrame, ev: pd.DataFrame) -> pd.DataFrame:
+def add_failure_features(panel: pd.DataFrame, ev: pd.DataFrame, label_start: pd.Timestamp = LABEL_START) -> pd.DataFrame:
     on = ev.rename(columns={"event_start": "date"})
 
     # --- labels
@@ -195,7 +195,7 @@ def add_failure_features(panel: pd.DataFrame, ev: pd.DataFrame) -> pd.DataFrame:
     days_to_next = (nxt["date"] - panel["production_date"].reset_index(drop=True)).dt.days.to_numpy()
     panel["days_to_next_failure"] = days_to_next
     last_day = panel.groupby("uwi")["production_date"].transform("max")
-    panel["label_observed"] = panel["production_date"] >= LABEL_START
+    panel["label_observed"] = panel["production_date"] >= label_start
     for h in HORIZONS:
         y = (days_to_next <= h).astype("float32")
         # unknown if the horizon runs past the well's last observed day with no event seen
@@ -263,8 +263,30 @@ def add_static(panel: pd.DataFrame, wells: pd.DataFrame) -> pd.DataFrame:
     return panel
 
 
+# --------------------------------------------------------------------------- proxy history
+PROXY_GROUPS = ("rod_truck", "workover", "pump_change")
+
+
+def proxy_failures(j: pd.DataFrame, before: pd.Timestamp) -> pd.DataFrame:
+    """Failure records reconstructed from repair jobs, for the years before failures were logged.
+
+    Checked against the recorded failures (2025-06 .. 2026-09): 83% of repair jobs match a recorded
+    failure within 7 days and 99% of recorded failures have a repair job within 7 days (F1 0.90).
+    Jobs on the same well within 7 days of the previous one count as one repair episode.
+    """
+    r = j[j["job_group"].isin(PROXY_GROUPS) & (j["start_date"] < before)].sort_values(["uwi", "start_date"])
+    gap = r.groupby("uwi")["start_date"].diff().dt.days
+    r = r[gap.isna() | (gap > 7)]
+    t = (r["job_type"].fillna("") + " " + r["job_subtype"].fillna("")).str.lower()
+    group = np.select([t.str.contains("rod"), r["job_group"].eq("pump_change") | t.str.contains("pump|pcp|stator|rotor"),
+                       t.str.contains("tub")], ["Rods", "Pump", "Tubing"], default="Other")
+    return pd.DataFrame({"uwi": r["uwi"].to_numpy(), "failure_start_date": r["start_date"].to_numpy(),
+                         "failure_end_date": pd.NaT, "failure_group": group, "cause_group": "Proxy (repair job)",
+                         "source": "proxy"})
+
+
 # --------------------------------------------------------------------------- main
-def run(processed: Path, raw: Path) -> None:
+def run(processed: Path, raw: Path, proxy_before: pd.Timestamp | None = None) -> None:
     panel = pd.read_parquet(processed / "model.parquet")
     panel = panel.drop(columns=[c for c in panel.columns if c.endswith("_s")])  # rescale later incl. new features
     wells = pd.read_parquet(processed / "wells.parquet")
@@ -279,10 +301,21 @@ def run(processed: Path, raw: Path) -> None:
              j["uwi"].isin(scope).groupby(j["uwi"]).first().sum(), j["uwi"].nunique())
     f = clean_failures(f[f["uwi"].isin(scope)])
     j = clean_jobs(j[j["uwi"].isin(scope)])
+    label_start, suffix = LABEL_START, ""
+    if proxy_before is not None:
+        # v3: recorded failures from proxy_before on, repair-job proxies before it -> labels from the panel start
+        f = f[f["failure_start_date"] >= proxy_before].assign(source="recorded")
+        px = proxy_failures(j, proxy_before)
+        f = pd.concat([f, px], ignore_index=True)
+        label_start, suffix = panel["production_date"].min(), "_v3"
+        log.info("proxy history: %d repair-job events before %s + %d recorded failures; labels from %s",
+                 len(px), proxy_before.date(), (f["source"] == "recorded").sum(), label_start.date())
 
     panel = panel.sort_values(["uwi", "production_date"]).reset_index(drop=True)
     ev = build_events(f, j, panel)
-    panel = add_failure_features(panel, ev)
+    if "source" in f:
+        ev["source"] = f["source"].reindex(ev["fid"]).to_numpy()
+    panel = add_failure_features(panel, ev, label_start)
     panel = add_job_features(panel, j)
     panel = add_static(panel, wells)
 
@@ -291,19 +324,22 @@ def run(processed: Path, raw: Path) -> None:
              "fail_next_30d rate %.3f", len(panel), panel.shape[1], len(obs),
              obs["failure_active"].sum(), obs["failure_onset"].sum(), obs["fail_next_30d"].mean())
     assert not panel.duplicated(["uwi", "production_date"]).any(), "join created duplicate rows"
-    panel.to_parquet(processed / "merged.parquet", index=False)
-    ev.to_parquet(processed / "failure_events.parquet", index=False)
-    j.to_parquet(processed / "jobs_clean.parquet", index=False)
-    log.info("wrote merged.parquet, failure_events.parquet, jobs_clean.parquet")
+    panel.to_parquet(processed / f"merged{suffix}.parquet", index=False)
+    ev.to_parquet(processed / f"failure_events{suffix}.parquet", index=False)
+    if not suffix:
+        j.to_parquet(processed / "jobs_clean.parquet", index=False)
+    log.info("wrote merged%s.parquet, failure_events%s.parquet", suffix, suffix)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--processed", type=Path, default=Path("data/processed"))
     ap.add_argument("--raw", type=Path, default=Path("data/raw"))
+    ap.add_argument("--proxy-before", help="also build merged_v3: repair-job proxy failures before this date "
+                                           "(e.g. 2025-06-01), recorded failures after it")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    run(args.processed, args.raw)
+    run(args.processed, args.raw, pd.Timestamp(args.proxy_before) if args.proxy_before else None)
 
 
 if __name__ == "__main__":
