@@ -31,6 +31,9 @@ using an NLinear model, plus a dashboard. DSMLC F26 Datathon.
 - Clean: python src/clean.py --input data/raw --output data/processed
 - Merge failures + jobs: python src/merge.py --raw data/raw (labels: failure_active, fail_next_7d/30d; failure records only exist from 2025-06)
 - EDA notebook: python notebooks/build_eda.py, then execute notebooks/eda_failure_drivers.ipynb
+- Proxy history 2021+: python src/merge.py --raw raw_dataset --proxy-before 2025-06-01 -> merged_v3.parquet, failure_events_v3.parquet (repair jobs as failures before 2025-06; 83% precision / 99% recall vs recorded failures).
+- Run-life (Kaplan-Meier): python src/survival.py -> outputs/survival/, reports/figures/09_run_life.png (shown in the dashboard's Run life tab).
+- Proxy-label training test: python src/train_proxy.py -> outputs/experiments/proxy_experiment.csv. Result: training on 2021-2026 (1.5M rows) did not beat 9 months (val PR-AUC 0.332 vs 0.333), so v1 stays the dashboard model.
 - Train: run src/model.ipynb with the `Python (datathon-2026)` kernel (conda env datathon-2026 has torch; base Anaconda's OpenMP clashes with torch). NLinear classifier for fail_next_30d; time split with 30-day purge gaps + held-out wells.
 - Experiments (validation-only selection): python src/train.py -> models/nlinear_fail30_v2.pt, outputs/experiments/. Features live in src/features.py (v1 = notebook pipeline, must stay bit-identical: python src/predict.py --verify).
 - Predict: python src/predict.py --model <ckpt> [--start 2026-04-01] [--threshold 0.5|f1|cost] [--forecast]

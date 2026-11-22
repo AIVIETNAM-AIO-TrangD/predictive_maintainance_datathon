@@ -116,6 +116,18 @@ def load_eval() -> dict[str, pd.DataFrame]:
     return {k: pd.read_csv(d / f"{k}.csv").query("model == @MODEL") for k in ("thresholds", "tiers", "topk", "policies")}
 
 
+@st.cache_data
+def load_survival() -> dict[str, pd.DataFrame] | None:
+    d = OUT / "survival"
+    if not (d / "summary.csv").exists():
+        return None
+    return {"summary": pd.read_csv(d / "summary.csv"), "km": pd.read_parquet(d / "km_curves.parquet"),
+            "wells": pd.read_parquet(d / "current_wells.parquet")}
+
+
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6"]   # categorical order, never cycled
+
+
 def style(fig, height=None):
     fig.update_layout(template="plotly_white", margin=dict(l=10, r=10, t=60, b=10), font=dict(color=INK),
                       legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
@@ -176,7 +188,9 @@ st.caption(f"Probability that each producing PCP well has a failure starting bet
            f"{win_end:%Y-%m-%d}, using data up to {anchor:%Y-%m-%d}. The data runs to Oct 27, but Oct 26–27 are only "
            f"partly reported (most wells show zero volumes), so they are not used as model input.")
 
-tab_fleet, tab_well, tab_factors, tab_model = st.tabs(["Fleet risk", "Well detail", "Risk factors", "Model performance"])
+tab_fleet, tab_well, tab_factors, tab_life, tab_model = st.tabs(
+    ["Fleet risk", "Well detail", "Risk factors", "Run life", "Model performance"])
+surv = load_survival()
 
 # ------------------------------------------------------------------------------------------ fleet
 with tab_fleet:
@@ -256,7 +270,14 @@ with tab_well:
     c[3].metric("Failures since mid-2025", f"{len(wev)}")
     c[4].metric("Last failure", f"{wev.event_start.max():%Y-%m-%d}" if len(wev) else "none recorded")
     c[5].metric("Pump", f"{w.pcp_pump_make or '–'}", help=f"Model: {w.pcp_pump_model}")
-    st.caption(f"Field: {w.field_operating_area} · Facility: {w.facility_name} · Status: {w.well_daily_status}")
+    life = ""
+    if surv is not None and uwi in set(surv["wells"].uwi):
+        sw = surv["wells"].set_index("uwi").loc[uwi]
+        if pd.notna(sw.run_days_since_repair):
+            life = (f" · Running **{sw.run_days_since_repair:.0f} producing days** since the last repair"
+                    + (f"; typical chance of failing in the next 30 producing days for a run this old in "
+                       f"{sw.km_curve_used}: **{sw.km_p_fail_30d:.0%}**" if pd.notna(sw.km_p_fail_30d) else ""))
+    st.caption(f"Field: {w.field_operating_area} · Facility: {w.facility_name} · Status: {w.well_daily_status}{life}")
 
     ch = load_drivers()
     left, right = st.columns([2, 3])
@@ -379,6 +400,77 @@ with tab_factors:
                    ("06_field_and_make.png", "Failures per well-year by field and pump make")]:
         if (FIG / f).exists():
             st.image(str(FIG / f), caption=cap)
+
+# ------------------------------------------------------------------------------------------ run life
+with tab_life:
+    if surv is None:
+        st.info("Run-life results are not available. Build them with `python src/survival.py`.")
+    else:
+        sm, km = surv["summary"], surv["km"]
+        allr = sm[sm.dimension == "all"].iloc[0]
+        st.markdown(
+            "How long wells keep producing after a repair before the next failure, 2021–2026 (Kaplan–Meier). "
+            "Run length counts **producing days** only. Failures before June 2025 are reconstructed from repair jobs "
+            "(83% of repair jobs match a recorded failure), so treat these as approximate.")
+        rep = sm[sm.dimension == "repaired"].set_index("group")
+        rpm = sm[sm.dimension == "rpm_band"].set_index("group")
+        c = st.columns(4)
+        c[0].metric("Median run life", f"{allr.median_run_days:.0f} days",
+                    help=f"{int(allr.runs):,} runs, {int(allr.wells)} wells")
+        c[1].metric("Still running after 180 days", f"{allr.survive_180d:.0%}")
+        if {"Rods", "Pump"} <= set(rep.index):
+            c[2].metric("After a rod vs a pump repair",
+                        f"{rep.median_run_days['Rods']:.0f} vs {rep.median_run_days['Pump']:.0f} days",
+                        help="Median run life depending on what was repaired at the start of the run")
+        if {"<150", "350+"} <= set(rpm.index):
+            c[3].metric("RPM < 150 vs 350+",
+                        f"{rpm.median_run_days['<150']:.0f} vs {rpm.median_run_days['350+']:.0f} days",
+                        help="Median run life by pump speed in the first 30 days of the run")
+
+        dims = {"Field": "field", "Pump RPM (first 30 days)": "rpm_band", "Water cut (first 30 days)": "water_cut_band",
+                "Pump make": "pump_make", "Component repaired": "repaired"}
+        dim = dims[st.radio("Compare by", list(dims), horizontal=True)]
+        order = {"rpm_band": ["<150", "150-250", "250-350", "350+"],
+                 "water_cut_band": ["<80%", "80-95%", "95-99%", "99%+"]}.get(dim)
+        g = sm[sm.dimension == dim]
+        names = [x for x in order if x in set(g.group)] if order else g.nlargest(6, "runs").group.tolist()
+        fig = go.Figure()
+        ref = km[(km.dimension == "all") & (km.t <= 365)]
+        fig.add_trace(go.Scatter(x=ref.t, y=ref.survival, name="all runs",
+                                 line=dict(color=GRAY, dash="dash", width=1.5, shape="hv")))
+        for k, name in enumerate(names):
+            cv = km[(km.dimension == dim) & (km.group == name) & (km.t <= 365)]
+            med = g.set_index("group").median_run_days[name]
+            fig.add_trace(go.Scatter(x=cv.t, y=cv.survival, name=f"{name} (median {med:.0f} d)",
+                                     line=dict(color=SERIES[k], width=2, shape="hv"),
+                                     hovertemplate=f"{name}<br>day %{{x}}: %{{y:.0%}} still running<extra></extra>"))
+        fig.add_hline(y=0.5, line=dict(color=GRAY, width=1, dash="dot"))
+        fig.update_layout(title="Share of runs still going, by producing days since the last repair",
+                          xaxis_title="producing days since last repair", yaxis_tickformat=".0%", yaxis_range=[0, 1.02])
+        style(fig, 460)
+        fig.update_layout(legend=dict(orientation="v", yanchor="top", y=0.98, xanchor="right", x=0.99))
+        st.plotly_chart(fig, width="stretch")
+        tbl = g.set_index("group").loc[names].reset_index()
+        st.dataframe(tbl[["group", "runs", "failures", "wells", "median_run_days", "survive_30d", "survive_90d",
+                          "survive_180d", "survive_365d"]], hide_index=True, width="stretch", column_config={
+            "group": "Group", "median_run_days": st.column_config.NumberColumn("Median run (days)", format="%d"),
+            **{f"survive_{x}d": st.column_config.NumberColumn(f"Running after {x} d", format="percent")
+               for x in (30, 90, 180, 365)}})
+
+        st.subheader("Wells most due for a failure by run life")
+        st.caption("Run-life view of risk: chance of a failure in the next 30 producing days for a run this old in the "
+                   "well's field, next to the model's 30-day risk. Wells running longer than almost any observed run "
+                   "have no run-life estimate. Filtered by the sidebar.")
+        cw = surv["wells"].merge(view[["uwi", "formatted_uwi", "fail_next_30d_prob_cal", "risk_tier"]], on="uwi")
+        cw = cw.dropna(subset=["km_p_fail_30d"]).sort_values("km_p_fail_30d", ascending=False)
+        st.dataframe(cw[["formatted_uwi", "field_operating_area", "pump_make", "run_days_since_repair", "km_p_fail_30d",
+                         "fail_next_30d_prob_cal", "risk_tier"]].head(200), hide_index=True, width="stretch", height=380,
+                     column_config={
+                         "formatted_uwi": "Well", "field_operating_area": "Field", "pump_make": "Pump make",
+                         "run_days_since_repair": st.column_config.NumberColumn("Producing days since repair", format="%d"),
+                         "km_p_fail_30d": st.column_config.NumberColumn("Run-life chance (30d)", format="percent"),
+                         "fail_next_30d_prob_cal": st.column_config.NumberColumn("Model risk (30d)", format="percent"),
+                         "risk_tier": "Tier"})
 
 # ------------------------------------------------------------------------------------------ model
 with tab_model:
